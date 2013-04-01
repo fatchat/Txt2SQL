@@ -38,23 +38,113 @@ namespace Txt2SQL
         }
     }
 
+    class DBTable
+    {
+        private string tableName_;
+        private int history_size_;
+        private int prediction_size_;
+        private string insertCmd_;
+
+        public bool verbose { get; set; }
+
+        public DBTable(string tableName)
+        {
+            this.tableName_ = tableName;
+            this.verbose = false;
+        }
+
+        public bool CreateTable(SqlConnection sqlConnection, int history_size, int prediction_size)
+        {
+            history_size_ = history_size;
+            prediction_size_ = prediction_size;
+
+            string create_cmd = "CREATE TABLE " + tableName_ + "(key_col [nchar](10) NOT NULL,";
+            for (int column = 1; column <= history_size_; ++column)
+            {
+                create_cmd += string.Format("history_{0} [float] NOT NULL,", column);
+            }
+            for (int column = 1; column < prediction_size_; ++column)
+            {
+                create_cmd += string.Format("predict_{0} [float] NOT NULL,", column);
+            }
+            create_cmd += string.Format("predict_{0} [float] NOT NULL)", prediction_size_);
+
+            try
+            {
+                if (this.verbose)
+                    Console.WriteLine("Executing command {0}", create_cmd);
+                SqlCommand createTableCmd = new SqlCommand(create_cmd, sqlConnection);
+                createTableCmd.ExecuteNonQuery();
+            }
+            catch (System.Data.SqlClient.SqlException e)
+            {
+                Console.WriteLine("Could not create table: {0}", e.Message);
+                return false;
+            }
+
+            // create the INSERT statement head
+            insertCmd_ = "INSERT INTO " + tableName_ + " (key_col, ";
+            for (int column = 1; column <= history_size_; ++column)
+            {
+                insertCmd_ += string.Format("history_{0},", column);
+            }
+            for (int column = 1; column < prediction_size_; ++column)
+            {
+                insertCmd_ += string.Format("predict_{0},", column);
+            }
+            insertCmd_ += string.Format("predict_{0}) ", prediction_size_);
+            insertCmd_ += "VALUES ";
+            return true;
+        }
+
+        public bool Insert(SqlConnection sqlConnection, IList<float> readings, int running_index)
+        {
+            string this_insert_cmd = insertCmd_;
+            this_insert_cmd += string.Format("({0},", running_index);
+            int last_index = history_size_ + prediction_size_ - 1;
+
+            for (int index = 0; index < last_index; ++index)
+            {
+                this_insert_cmd += string.Format("{0},", readings[index]);
+            }
+            this_insert_cmd += string.Format("{0})", readings[last_index]);
+            try
+            {
+                if (verbose)
+                    Console.WriteLine("Executing command {0}", this_insert_cmd);
+                SqlCommand insertCmd = new SqlCommand(this_insert_cmd, sqlConnection);
+                insertCmd.ExecuteNonQuery();
+            }
+            catch (System.Data.SqlClient.SqlException e)
+            {
+                Console.WriteLine("Could not insert into table: {0}", e.Message);
+                return false;
+            }
+            return true;
+        }
+    }
+
     // ==============================================================================================================
     public class Program
     {
+        static bool verbose { get; set; }
+
         static IList<float> ReadInput(string inputFile, float vert_width)
         {
             string[] lines = System.IO.File.ReadAllLines(inputFile);
             IList<float> readings = new List<float>();
+            const int timestamp_length = 11;
 
             foreach (string line in lines)
             {
                 // each line looks like
                 // [63500083637, 17.04221],
-                string tail = line.Substring(1 + line.IndexOf(' '));
-                string head = tail.Substring(0, tail.Length - 2);
-                float reading = float.Parse(head);
+                string ts_str = line.Substring(1, timestamp_length);
+                long timestamp = long.Parse(ts_str);
+                string tval = line.Substring(line.IndexOf(' ') + 1);
+                string value = tval.Substring(0, tval.Length - 2);
+                float reading = float.Parse(value);
                 float new_val;
-
                 if (vert_width > 0)
                 {
                     int bucket = (int)(reading / vert_width);
@@ -64,11 +154,27 @@ namespace Txt2SQL
                 {
                     new_val = reading; 
                 }
-
                 readings.Add(new_val);
             }
-
             return readings;
+        }
+
+        static SqlConnection GetSqlConnection(string dbName)
+        {
+            SqlConnection sqlConnection = new SqlConnection();
+            sqlConnection.ConnectionString = string.Format("Server=localhost; database={0}; Trusted_Connection=SSPI", dbName);
+            try
+            {
+                if (verbose)
+                    Console.WriteLine("Connecting using {0}", sqlConnection.ConnectionString);
+                sqlConnection.Open();
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("Could not open connection to DB: " + e.ToString());
+                sqlConnection = null;
+            }
+            return sqlConnection;
         }
 
         static void Main(string[] args)
@@ -79,90 +185,26 @@ namespace Txt2SQL
             {
                 if (options.predict < 1 || options.history < 1)
                     throw new System.ArgumentOutOfRangeException("Values for <predict> and <history> must be at least 1");
-
-                // ============================================================
+                verbose = options.verbose;
                 // read values into a list of floats
                 IList<float> readings = ReadInput(options.inputFile, options.bucket_size);
-         
-                // ============================================================
-                // write the readings into the SQL table
-                SqlConnection sqlConnection = new SqlConnection();
-                sqlConnection.ConnectionString = "Server=localhost; database=TimeSeries; Trusted_Connection=SSPI";
-
-                try
+                // open connection to DB
+                SqlConnection sqlConnection = GetSqlConnection("TimeSeries");
+                if (sqlConnection != null)
                 {
-                    if (options.verbose)
-                        Console.WriteLine("Connecting using {0}", sqlConnection.ConnectionString);
-                    sqlConnection.Open();
-                }
-                catch (Exception e)
-                {
-                    Console.WriteLine("Could not open connection to DB: " + e.ToString());
-                }
-
-                // create the table
-                string table_name = options.table;
-                string create_cmd = "CREATE TABLE " + table_name + "(key_col [nchar](10) NOT NULL,";
-                for (int column = 1; column <= options.history; ++column)
-                {
-                    create_cmd += string.Format("history_{0} [float] NOT NULL,", column);
-                }
-                for (int column = 1; column < options.predict; ++column)
-                {
-                    create_cmd += string.Format("predict_{0} [float] NOT NULL,", column);
-                }
-                create_cmd += string.Format("predict_{0} [float] NOT NULL)", options.predict);
-                
-                try
-                {
-                    if (options.verbose)
-                        Console.WriteLine("Executing command {0}", create_cmd);
-                    SqlCommand createTableCmd = new SqlCommand(create_cmd, sqlConnection);
-                    createTableCmd.ExecuteNonQuery();
-                }
-                catch (System.Data.SqlClient.SqlException e)
-                {
-                    Console.WriteLine("Could not create table: {0}", e.Message);
-                    return;
-                }
-
-                // create the INSERT statement
-                string insert_cmd = "INSERT INTO " + table_name + " (key_col, ";
-                for (int column = 1; column <= options.history; ++column)
-                {
-                    insert_cmd += string.Format("history_{0},", column);
-                }
-                for (int column = 1; column < options.predict; ++column)
-                {
-                    insert_cmd += string.Format("predict_{0},", column);
-                }
-                insert_cmd += string.Format("predict_{0}) ", options.predict);
-                insert_cmd += "VALUES ";
-
-                for (int running_index = 0; running_index < readings.Count - options.history - options.predict + 1; ++running_index)
-                {
-                    string this_insert_cmd = insert_cmd;
-                    this_insert_cmd += string.Format("({0},", running_index);
-
-                    for (int index = 0; index < options.history + options.predict - 1; ++index)
+                    // create a new table
+                    DBTable dbTable = new DBTable(options.table);
+                    dbTable.verbose = verbose;
+                    if (true == dbTable.CreateTable(sqlConnection, options.history, options.predict))
                     {
-                        this_insert_cmd += string.Format("{0},", readings[running_index + index]);
+                        // insert row by row
+                        for (int index = 0; index + options.history + options.predict <= readings.Count; ++index)
+                        {
+                            List<float> sublist = ((List<float>)readings).GetRange(index, options.history + options.predict);
+                            if (false == dbTable.Insert(sqlConnection, sublist, index))
+                                break;
+                        }
                     }
-                    this_insert_cmd += string.Format("{0})", readings[running_index + options.history + options.predict - 1]);
-
-                    try
-                    {
-                        if (options.verbose)
-                            Console.WriteLine("Executing command {0}", this_insert_cmd);
-                        SqlCommand insertCmd = new SqlCommand(this_insert_cmd, sqlConnection);
-                        insertCmd.ExecuteNonQuery();
-                    }
-                    catch (System.Data.SqlClient.SqlException e)
-                    {
-                        Console.WriteLine("Could not insert into table: {0}", e.Message);
-                    }
-
-
                 }
             }
         }
