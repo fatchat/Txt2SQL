@@ -38,6 +38,7 @@ namespace Txt2SQL
         }
     }
 
+    // ==============================================================================================================
     class DBTable
     {
         private string tableName_;
@@ -47,16 +48,12 @@ namespace Txt2SQL
 
         public bool verbose { get; set; }
 
-        public DBTable(string tableName)
+        public DBTable(SqlConnection sqlConnection, string tableName, int history_size, int prediction_size)
         {
             this.tableName_ = tableName;
+            this.history_size_ = history_size;
+            this.prediction_size_ = prediction_size;
             this.verbose = false;
-        }
-
-        public bool CreateTable(SqlConnection sqlConnection, int history_size, int prediction_size)
-        {
-            history_size_ = history_size;
-            prediction_size_ = prediction_size;
 
             string create_cmd = "CREATE TABLE " + tableName_ + "(key_col [nchar](10) NOT NULL,";
             for (int column = 1; column <= history_size_; ++column)
@@ -79,7 +76,7 @@ namespace Txt2SQL
             catch (System.Data.SqlClient.SqlException e)
             {
                 Console.WriteLine("Could not create table: {0}", e.Message);
-                return false;
+                throw;
             }
 
             // create the INSERT statement head
@@ -94,7 +91,6 @@ namespace Txt2SQL
             }
             insertCmd_ += string.Format("predict_{0}) ", prediction_size_);
             insertCmd_ += "VALUES ";
-            return true;
         }
 
         public bool Insert(SqlConnection sqlConnection, IList<float> readings, int running_index)
@@ -192,11 +188,11 @@ namespace Txt2SQL
                 SqlConnection sqlConnection = GetSqlConnection("TimeSeries");
                 if (sqlConnection != null)
                 {
-                    // create a new table
-                    DBTable dbTable = new DBTable(options.table);
-                    dbTable.verbose = verbose;
-                    if (true == dbTable.CreateTable(sqlConnection, options.history, options.predict))
+                    try
                     {
+                        // create a new table
+                        DBTable dbTable = new DBTable(sqlConnection, options.table, options.history, options.predict);
+                        dbTable.verbose = verbose;
                         // insert row by row
                         for (int index = 0; index + options.history + options.predict <= readings.Count; ++index)
                         {
@@ -204,6 +200,10 @@ namespace Txt2SQL
                             if (false == dbTable.Insert(sqlConnection, sublist, index))
                                 break;
                         }
+                    }
+                    catch (Exception e)
+                    {
+                        Console.WriteLine("Caught exception: {0}", e.Message);
                     }
                 }
             }
