@@ -24,14 +24,23 @@ namespace Txt2SQL
         [Option('p', "predict", HelpText = "length of prediction window")]
         public int predict { get; set; }
 
+        [Option('n', "dbname", HelpText = "name of DB to create table in")]
+        public string dbname { get; set; }
+
         [Option('t', "table", HelpText = "name of SQL table to create")]
         public string table { get; set; }
 
         [Option('b', "bucket-size", DefaultValue=0, HelpText = "vertical width to define buckets for classifying input")]
         public float bucket_size { get; set; }
 
-        [Option('v', "verbose", DefaultValue = false, HelpText = "Show details")]
+        [Option('v', "verbose", DefaultValue = false, HelpText = "show details")]
         public bool verbose { get; set; }
+
+        [Option('d', "diffs", DefaultValue = false, HelpText = "calc adjacent differences")]
+        public bool diffs { get; set; }
+
+        [Option('o', "timeformat", DefaultValue="HH:mm:ss", HelpText = "datetime format when displaying input")]
+        public string timeformat { get; set; }
 
         [HelpOption]
         public string GetUsage()
@@ -133,16 +142,24 @@ namespace Txt2SQL
         public DateTime dt { get; set; }
         public float data { get; set; }
     }
+    struct ReadInputArgs
+    {
+        public bool diffs { get; set; }
+        public float vert_width { get; set; }
+        public string timeformat { get; set; }
+        public string dbname { get; set; }
+    }
     public class Program
     {
         static bool verbose { get; set; }
 
-        static IList<TickData> ReadInput(string inputFile, float vert_width)
+        static IList<TickData> ReadInput(string inputFile, ReadInputArgs args)
         {
             string[] lines = System.IO.File.ReadAllLines(inputFile);
             IList<TickData> readings = new List<TickData>();
             const int timestamp_length = 11;
-
+            float last_val = 0;
+            int counter = 0;
             foreach (string line in lines)
             {
                 // each line looks like
@@ -154,14 +171,21 @@ namespace Txt2SQL
                 string value = tval.Substring(0, tval.Length - 2);
                 float reading = float.Parse(value);
                 float new_val = reading;
-                if (vert_width > 0)
+                if (args.vert_width > 0)
                 {
-                    int bucket = (int)(reading / vert_width);
+                    int bucket = (int)(reading / args.vert_width);
                     new_val = (float)bucket;
+                }
+                if (args.diffs)
+                {
+                    float orig_val = new_val;
+                    new_val = new_val - last_val;
+                    last_val = orig_val;
                 }
                 readings.Add(new TickData { dt = datetime, data = new_val });
                 if (verbose)
-                    Console.WriteLine("{0} => {1}", datetime.ToString("HH:mm:ss"), new_val);
+                    Console.WriteLine("insert into dbo.{3} ([key_col], [dt], [value]) values ({2}, \'{0}\', {1});", datetime.ToString(args.timeformat), new_val, counter.ToString(), args.dbname);
+                ++counter;
             }
             return readings;
         }
@@ -192,7 +216,13 @@ namespace Txt2SQL
             {
                 verbose = options.verbose;
                 // read values into a list of floats
-                IList<TickData> readings = ReadInput(options.inputFile, options.bucket_size);
+                IList<TickData> readings = ReadInput(options.inputFile, new ReadInputArgs() 
+                                                                        {
+                                                                            vert_width=options.bucket_size,
+                                                                            diffs=options.diffs,
+                                                                            timeformat=options.timeformat,
+                                                                            dbname = options.dbname
+                                                                        });
                 if (options.read_only)
                 {
                     return;
@@ -208,7 +238,7 @@ namespace Txt2SQL
                     return;
                 }
                 // open connection to DB
-                SqlConnection sqlConnection = GetSqlConnection("TimeSeries");
+                SqlConnection sqlConnection = GetSqlConnection(options.dbname);
                 if (sqlConnection != null)
                 {
                     try
