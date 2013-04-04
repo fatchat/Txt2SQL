@@ -28,7 +28,7 @@ namespace Txt2SQL
         public string dbname { get; set; }
 
         [Option('t', "table", HelpText = "name of SQL table to create")]
-        public string table { get; set; }
+        public string tablename { get; set; }
 
         [Option('b', "bucket-size", DefaultValue=0, HelpText = "vertical width to define buckets for classifying input")]
         public float bucket_size { get; set; }
@@ -109,7 +109,7 @@ namespace Txt2SQL
             insertCmd_ += "VALUES ";
         }
 
-        public bool Insert(SqlConnection sqlConnection, IList<TickData> readings, int running_index)
+        public void Insert(SqlConnection sqlConnection, IList<TickData> readings, int running_index)
         {
             string this_insert_cmd = insertCmd_;
             this_insert_cmd += string.Format("({0},", running_index);
@@ -130,9 +130,8 @@ namespace Txt2SQL
             catch (System.Data.SqlClient.SqlException e)
             {
                 Console.WriteLine("Could not insert into table: {0}", e.Message);
-                return false;
+                throw;
             }
-            return true;
         }
     }
 
@@ -151,7 +150,7 @@ namespace Txt2SQL
     }
     public class Program
     {
-        static bool verbose { get; set; }
+        static bool sVerbose { get; set; }
 
         static IList<TickData> ReadInput(string inputFile, ReadInputArgs args)
         {
@@ -183,7 +182,7 @@ namespace Txt2SQL
                     last_val = orig_val;
                 }
                 readings.Add(new TickData { dt = datetime, data = new_val });
-                if (verbose)
+                if (sVerbose)
                     Console.WriteLine("insert into dbo.{3} ([key_col], [dt], [value]) values ({2}, \'{0}\', {1});", datetime.ToString(args.timeformat), new_val, counter.ToString(), args.dbname);
                 ++counter;
             }
@@ -196,13 +195,13 @@ namespace Txt2SQL
             sqlConnection.ConnectionString = string.Format("Server=localhost; database={0}; Trusted_Connection=SSPI", dbName);
             try
             {
-                if (verbose)
+                if (sVerbose)
                     Console.WriteLine("Connecting using {0}", sqlConnection.ConnectionString);
                 sqlConnection.Open();
             }
             catch (Exception e)
             {
-                Console.WriteLine("Could not open connection to DB: " + e.ToString());
+                Console.WriteLine("Could not open connection to DB: " + e.Message);
                 sqlConnection = null;
             }
             return sqlConnection;
@@ -214,7 +213,7 @@ namespace Txt2SQL
 
             if (CommandLine.Parser.Default.ParseArguments(args, options))
             {
-                verbose = options.verbose;
+                sVerbose = options.verbose;
                 // read values into a list of floats
                 IList<TickData> readings = ReadInput(options.inputFile, new ReadInputArgs() 
                                                                         {
@@ -232,7 +231,7 @@ namespace Txt2SQL
                     Console.WriteLine("Values for <predict> and <history> must be at least 1");
                     return;
                 }
-                if (options.table == null)
+                if (options.tablename == null)
                 {
                     Console.WriteLine("Table name is required");
                     return;
@@ -243,16 +242,16 @@ namespace Txt2SQL
                 {
                     try
                     {
+                        // timestep is used to name the columns, we figure it out using only the first two values
                         int timestep = (readings[1].dt - readings[0].dt).Seconds;
                         // create a new table
-                        DBTable dbTable = new DBTable(sqlConnection, options.table, options.history, options.predict, timestep);
-                        dbTable.verbose = verbose;
+                        DBTable dbTable = new DBTable(sqlConnection, options.tablename, options.history, options.predict, timestep);
+                        dbTable.verbose = sVerbose;
                         // insert row by row
                         for (int index = 0; index + options.history + options.predict <= readings.Count; ++index)
                         {
-                            List<TickData> sublist = ((List<TickData>)readings).GetRange(index, options.history + options.predict);
-                            if (false == dbTable.Insert(sqlConnection, sublist, index))
-                                break;
+                            List<TickData> sublist = ((List<TickData>)readings).GetRange(index, options.history + options.predict); // shallow copy
+                            dbTable.Insert(sqlConnection, sublist, index);
                         }
                     }
                     catch (Exception e)
