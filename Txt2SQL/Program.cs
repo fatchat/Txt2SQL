@@ -12,13 +12,31 @@ namespace Txt2SQL
     // ==============================================================================================================
     class Options
     {
+        [Option('v', "verbose", DefaultValue = false, HelpText = "show details")]
+        public bool verbose { get; set; }
+
         [Option('f', "file", Required = true, HelpText = "input file")]
         public string inputFile { get; set; }
 
-        [Option('r', "readonly", DefaultValue=false, HelpText="specify to stop after reading")]
+        // ========= display the input data ==========
+        [Option('r', "read-only", DefaultValue=false, HelpText="specify to stop after reading")]
         public bool read_only { get; set; }
 
-        [Option('h', "history", HelpText="length of history")]
+        [Option('o', "timeformat", DefaultValue = "HH:mm:ss", HelpText = "datetime format when displaying input")]
+        public string timeformat { get; set; }
+
+        [Option('m', "transform-format", DefaultValue = null, HelpText = "Transform output, <TimeSeriesDBInsert>, <UnixTime>")]
+        public string transform_format { get; set; }
+
+        // ======= for display & DB writes ========
+        [Option('b', "bucket-size", DefaultValue = 0, HelpText = "vertical width to define buckets for classifying input")]
+        public float bucket_size { get; set; }
+
+        [Option('d', "diffs", DefaultValue = false, HelpText = "calc adjacent differences")]
+        public bool diffs { get; set; }
+
+        // ========= for DB writes only ==========
+        [Option('h', "history", HelpText = "length of history")]
         public int history { get; set; }
 
         [Option('p', "predict", HelpText = "length of prediction window")]
@@ -29,18 +47,6 @@ namespace Txt2SQL
 
         [Option('t', "table", HelpText = "name of SQL table to create")]
         public string tablename { get; set; }
-
-        [Option('b', "bucket-size", DefaultValue=0, HelpText = "vertical width to define buckets for classifying input")]
-        public float bucket_size { get; set; }
-
-        [Option('v', "verbose", DefaultValue = false, HelpText = "show details")]
-        public bool verbose { get; set; }
-
-        [Option('d', "diffs", DefaultValue = false, HelpText = "calc adjacent differences")]
-        public bool diffs { get; set; }
-
-        [Option('o', "timeformat", DefaultValue="HH:mm:ss", HelpText = "datetime format when displaying input")]
-        public string timeformat { get; set; }
 
         [HelpOption]
         public string GetUsage()
@@ -117,12 +123,19 @@ namespace Txt2SQL
         public DateTime dt { get; set; }
         public float data { get; set; }
     }
+    enum TransformFormats
+    {
+        NoOutput,
+        TimeSeriesDBInsert,
+        UnixTime
+    }
     struct ReadInputArgs
     {
         public bool diffs { get; set; }
         public float vert_width { get; set; }
         public string timeformat { get; set; }
         public string dbname { get; set; }
+        public TransformFormats transform_format { get; set; }
     }
     public class Program
     {
@@ -132,7 +145,7 @@ namespace Txt2SQL
         {
             string[] lines = System.IO.File.ReadAllLines(inputFile);
             IList<TickData> readings = new List<TickData>();
-            const int timestamp_length = 11;
+            const int timestamp_length = 11; // MAGIC NUMBER
             float last_val = 0;
             int counter = 0;
             foreach (string line in lines)
@@ -158,8 +171,19 @@ namespace Txt2SQL
                     last_val = orig_val;
                 }
                 readings.Add(new TickData { dt = datetime, data = new_val });
-                if (sVerbose)
-                    Console.WriteLine("insert into dbo.{3} ([key_col], [dt], [value]) values ({2}, \'{0}\', {1});", datetime.ToString(args.timeformat), new_val, counter.ToString(), args.dbname);
+                if (args.transform_format == TransformFormats.TimeSeriesDBInsert)
+                {
+                    Console.WriteLine("insert into dbo.{3} ([key_col], [dt], [value]) values ({2}, \'{0}\', {1});", 
+                                        datetime.ToString(args.timeformat), 
+                                        new_val, 
+                                        counter.ToString(), 
+                                        args.dbname);
+                }
+                if (args.transform_format == TransformFormats.UnixTime)
+                {
+                    long epoch_time = (datetime.ToUniversalTime().Ticks - 621355968000000000) / 10000000;
+                    Console.WriteLine("[{0}, {1}],", epoch_time, new_val);
+                }
                 ++counter;
             }
             return readings;
@@ -191,12 +215,31 @@ namespace Txt2SQL
             {
                 sVerbose = options.verbose;
                 // read values into a list of floats
+                TransformFormats trans_format = TransformFormats.NoOutput;
+                if (options.transform_format != null)
+                {
+                    if (!options.read_only)
+                    {
+                        Console.WriteLine("The transform-format flag must be accompanied by the read-only flag");
+                        return;
+                    }
+                    if (Enum.IsDefined(typeof(TransformFormats), options.transform_format))
+                    {
+                        trans_format = (TransformFormats)Enum.Parse(typeof(TransformFormats), options.transform_format);
+                    }
+                    else
+                    {
+                        Console.WriteLine("Unrecognized transform format: {0}", options.transform_format);
+                        return;
+                    }
+                }
                 IList<TickData> readings = ReadInput(options.inputFile, new ReadInputArgs() 
                                                                         {
-                                                                            vert_width=options.bucket_size,
-                                                                            diffs=options.diffs,
-                                                                            timeformat=options.timeformat,
-                                                                            dbname = options.dbname
+                                                                            vert_width=options.bucket_size
+                                                                            , diffs=options.diffs
+                                                                            , timeformat=options.timeformat
+                                                                            , dbname=options.dbname
+                                                                            , transform_format=trans_format
                                                                         });
                 if (options.read_only)
                 {
