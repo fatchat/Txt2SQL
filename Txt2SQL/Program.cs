@@ -65,31 +65,23 @@ namespace Txt2SQL
             this.tableName_ = tableName;
             this.history_size_ = history_size;
             this.prediction_size_ = prediction_size;
-            this.verbose = false;
-            List<string> column_names = new List<string>();
-
-            string create_cmd = "CREATE TABLE " + tableName_ + "(key_col [nchar](10) NOT NULL,";
-            for (int column = 1; column <= history_size_; ++column)
-            {
-                string column_name = string.Format("history_{0}", timestep * (history_size_ - column));
-                create_cmd += string.Format("{0} [float] NOT NULL,", column_name);
-                column_names.Add(column_name);
-            }
-            for (int column = 1; column < prediction_size_; ++column)
-            {
-                string column_name = string.Format("predict_{0}", timestep * column);
-                create_cmd += string.Format("{0} [float] NOT NULL,", column_name);
-                column_names.Add(column_name);
-            }
-            {
-                string column_name = string.Format("predict_{0}", timestep * prediction_size_);
-                create_cmd += string.Format("{0} [float] NOT NULL)", column_name);
-                column_names.Add(column_name);
-            }
+            this.verbose = true;
+            List<string> column_names = (from column in Enumerable.Range(1, history_size_)
+                                select string.Format("history_{0}", timestep * (history_size_ - column))
+                               ).ToList<string>();
+            column_names.AddRange(from column in Enumerable.Range(1, prediction_size_)
+                                  select string.Format("predict_{0}", timestep * column)
+                                  );
+            string create_cmd = "CREATE TABLE " + 
+                                tableName_ + 
+                                " (key_col [nchar](10) NOT NULL," +
+                                string.Join(", ", from col_name in column_names
+                                                 select string.Format("{0} [float] NOT NULL", col_name)) + 
+                                ")";
+            if (this.verbose)
+                Console.WriteLine("Executing command {0}", create_cmd);
             try
             {
-                if (this.verbose)
-                    Console.WriteLine("Executing command {0}", create_cmd);
                 SqlCommand createTableCmd = new SqlCommand(create_cmd, sqlConnection);
                 createTableCmd.ExecuteNonQuery();
             }
@@ -98,40 +90,24 @@ namespace Txt2SQL
                 Console.WriteLine("Could not create table: {0}", e.Message);
                 throw;
             }
-
-            // create the INSERT statement head
-            insertCmd_ = "INSERT INTO " + tableName_ + " (key_col, ";
-            for (int column = 0; column < history_size_ + prediction_size_ - 1; ++column)
-            {
-                insertCmd_ += string.Format("{0},", column_names[column]);
-            }
-            insertCmd_ += string.Format("{0}) ", column_names.Last());
-            insertCmd_ += "VALUES ";
-        }
+            // create the INSERT statement head for use in Insert()
+            insertCmd_ = "INSERT INTO " +
+                         tableName_ +
+                         " (key_col, " +
+                         string.Join(", ", column_names) +
+                         ") VALUES ";
+        } 
 
         public void Insert(SqlConnection sqlConnection, IList<TickData> readings, int running_index)
         {
-            string this_insert_cmd = insertCmd_;
-            this_insert_cmd += string.Format("({0},", running_index);
-            int last_index = history_size_ + prediction_size_ - 1;
-
-            for (int index = 0; index < last_index; ++index)
-            {
-                this_insert_cmd += string.Format("{0},", readings[index].data);
-            }
-            this_insert_cmd += string.Format("{0})", readings[last_index].data);
-            try
-            {
-                if (verbose)
-                    Console.WriteLine("Executing command {0}", this_insert_cmd);
-                SqlCommand insertCmd = new SqlCommand(this_insert_cmd, sqlConnection);
-                insertCmd.ExecuteNonQuery();
-            }
-            catch (System.Data.SqlClient.SqlException e)
-            {
-                Console.WriteLine("Could not insert into table: {0}", e.Message);
-                throw;
-            }
+            string this_insert_cmd = insertCmd_ +
+                                     string.Format("({0}, ", running_index) +
+                                     string.Join(", ", from reading in readings select reading.data.ToString()) +
+                                     ")";
+            if (verbose)
+                Console.WriteLine("Executing command {0}", this_insert_cmd);
+            SqlCommand insertCmd = new SqlCommand(this_insert_cmd, sqlConnection);
+            insertCmd.ExecuteNonQuery(); // may throw exception
         }
     }
 
