@@ -19,14 +19,11 @@ namespace Txt2SQL
         public string inputFile { get; set; }
 
         // ========= display the input data ==========
-        [Option('r', "read-only", DefaultValue=false, HelpText="specify to stop after reading")]
-        public bool read_only { get; set; }
+        [Option('m', "transform-format", DefaultValue = "InputFormat", HelpText = "Transform output: <InputFormat>/ <TimeSeriesDBInsert>/ <UnixTime>")]
+        public string transform_format { get; set; }
 
         [Option('o', "timeformat", DefaultValue = "HH:mm:ss", HelpText = "datetime format when displaying input")]
         public string timeformat { get; set; }
-
-        [Option('m', "transform-format", DefaultValue = null, HelpText = "Transform output, <TimeSeriesDBInsert>, <UnixTime>")]
-        public string transform_format { get; set; }
 
         // ======= for display & DB writes ========
         [Option('b', "bucket-size", DefaultValue = 0, HelpText = "vertical width to define buckets for classifying input")]
@@ -34,6 +31,9 @@ namespace Txt2SQL
 
         [Option('d', "diffs", DefaultValue = false, HelpText = "calc adjacent differences")]
         public bool diffs { get; set; }
+
+        [Option('j', "jump", DefaultValue = null, HelpText = "hr jump,offset, min jump,offset, second jump,offset - all integers")]
+        public string jump { get; set; }
 
         // ========= for DB writes only ==========
         [Option('h', "history", HelpText = "length of history")]
@@ -118,76 +118,155 @@ namespace Txt2SQL
     }
 
     // ==============================================================================================================
-    struct TickData
+    public struct TickData
     {
         public DateTime dt { get; set; }
         public float data { get; set; }
     }
-    enum TransformFormats
+    public enum TransformFormats
     {
-        NoOutput,
+        NoTransform,
+        InputFormat,
         TimeSeriesDBInsert,
         UnixTime
     }
-    struct ReadInputArgs
+    public struct ReadInputArgs
     {
         public bool diffs { get; set; }
         public float vert_width { get; set; }
         public string timeformat { get; set; }
         public string dbname { get; set; }
         public TransformFormats transform_format { get; set; }
+        public string jump { get; set; }
     }
-    public class Program
+    public class TimeSignatureMatcher
     {
-        static bool sVerbose { get; set; }
-
-        static IList<TickData> ReadInput(string inputFile, ReadInputArgs args)
+        public int hr_jump { get; set; }
+        public int hr_offset { get; set; }
+        public int min_jump { get; set; }
+        public int min_offset { get; set; }
+        public int sec_jump { get; set; }
+        public int sec_offset { get; set; }
+        public TimeSignatureMatcher(string jumpstr)
         {
-            string[] lines = System.IO.File.ReadAllLines(inputFile);
+            if (jumpstr != null)
+            {
+                string[] inputs = jumpstr.Split(',');
+                if (inputs.Length != 6)
+                {
+                    throw new Exception("Jump string format incorrect");
+                }
+                try
+                {
+                    hr_jump = int.Parse(inputs[0]);
+                    hr_offset = int.Parse(inputs[1]);
+                    min_jump = int.Parse(inputs[2]);
+                    min_offset = int.Parse(inputs[3]);
+                    sec_jump = int.Parse(inputs[4]);
+                    sec_offset = int.Parse(inputs[5]);
+                }
+                catch (Exception)
+                {
+                    throw new Exception("Jump string format incorrect [2]");
+                }
+            }
+            else
+            {
+                hr_jump = -1;   hr_offset = -1;
+                min_jump = -1;  min_offset = -1;
+                sec_jump = -1;  sec_offset = -1;
+            }
+        }
+        public bool Match(DateTime datetime)
+        {
+            bool retval = true;
+            retval = retval && ((hr_offset < 0) || ((datetime.Hour - hr_offset) % hr_jump == 0));
+            retval = retval && ((min_offset < 0) || ((datetime.Minute - min_offset) % min_jump == 0));
+            retval = retval && ((sec_offset < 0) || ((datetime.Second - sec_offset) % sec_jump == 0));
+            return retval;
+        }
+    }
+    public class InputReader
+    {
+        public static IList<TickData> ReadInput(string inputFile, ReadInputArgs args)
+        {
             IList<TickData> readings = new List<TickData>();
-            const int timestamp_length = 11; // MAGIC NUMBER
             float last_val = 0;
             int counter = 0;
+            // handle the jump string if specified
+            TimeSignatureMatcher jumpdata = null;
+            try
+            {
+                jumpdata = new TimeSignatureMatcher(args.jump);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e.Message);
+                return readings;
+            }
+            // read the file
+            string[] lines = System.IO.File.ReadAllLines(inputFile);
             foreach (string line in lines)
             {
-                // each line looks like
-                // [63500083637, 17.04221],
-                string ts_str = line.Substring(1, timestamp_length);
+                // each line looks like "[63500083637, 17.04221],"
+                int loc_space = line.IndexOf(' ');
+
+                string ts_str = line.Substring(1, loc_space - 2);
                 long timestamp = long.Parse(ts_str);
                 DateTime datetime = new DateTime(timestamp * TimeSpan.TicksPerSecond);
-                string tval = line.Substring(line.IndexOf(' ') + 1);
-                string value = tval.Substring(0, tval.Length - 2);
-                float reading = float.Parse(value);
-                float new_val = reading;
-                if (args.vert_width > 0)
+
+                if (jumpdata.Match(datetime))
                 {
-                    int bucket = (int)(reading / args.vert_width);
-                    new_val = (float)bucket;
+                    string val_str = line.Substring(loc_space + 1, line.Length - 2 - loc_space - 1);
+                    float new_val = float.Parse(val_str);
+                    // bucketize
+                    if (args.vert_width > 0)
+                    {
+                        int bucket = (int)(new_val / args.vert_width);
+                        new_val = (float)bucket;
+                    }
+                    // adjacent differences
+                    if (args.diffs)
+                    {
+                        float orig_val = new_val;
+                        new_val = new_val - last_val;
+                        last_val = orig_val;
+                    }
+                    // output SQL INSERT statement
+                    if (args.transform_format == TransformFormats.TimeSeriesDBInsert)
+                    {
+                        Console.WriteLine("insert into dbo.{3} ([key_col], [dt], [value]) values ({2}, \'{0}\', {1});",
+                                            datetime.ToString(args.timeformat),
+                                            new_val,
+                                            counter.ToString(),
+                                            args.dbname);
+                    }
+                    // output unix time
+                    else if (args.transform_format == TransformFormats.UnixTime)
+                    {
+                        long epoch_time = (datetime.ToUniversalTime().Ticks - 621355968000000000) / 10000000;
+                        Console.WriteLine("[{0}, {1}],", epoch_time, new_val);
+                    }
+                    // output using same format as input
+                    else if (args.transform_format == TransformFormats.InputFormat)
+                    {
+                        Console.WriteLine("[{0}, {1}],", datetime.Ticks / TimeSpan.TicksPerSecond, new_val);
+                    }
+                    // no output, add to list for further processing
+                    else
+                    {
+                        readings.Add(new TickData { dt = datetime, data = new_val });
+                    }
+                    ++counter;
                 }
-                if (args.diffs)
-                {
-                    float orig_val = new_val;
-                    new_val = new_val - last_val;
-                    last_val = orig_val;
-                }
-                readings.Add(new TickData { dt = datetime, data = new_val });
-                if (args.transform_format == TransformFormats.TimeSeriesDBInsert)
-                {
-                    Console.WriteLine("insert into dbo.{3} ([key_col], [dt], [value]) values ({2}, \'{0}\', {1});", 
-                                        datetime.ToString(args.timeformat), 
-                                        new_val, 
-                                        counter.ToString(), 
-                                        args.dbname);
-                }
-                if (args.transform_format == TransformFormats.UnixTime)
-                {
-                    long epoch_time = (datetime.ToUniversalTime().Ticks - 621355968000000000) / 10000000;
-                    Console.WriteLine("[{0}, {1}],", epoch_time, new_val);
-                }
-                ++counter;
             }
             return readings;
         }
+    }
+    // ==============================================================================================================
+    public class Program
+    {
+        static bool sVerbose { get; set; }
 
         static SqlConnection GetSqlConnection(string dbName)
         {
@@ -214,15 +293,10 @@ namespace Txt2SQL
             if (CommandLine.Parser.Default.ParseArguments(args, options))
             {
                 sVerbose = options.verbose;
-                // read values into a list of floats
-                TransformFormats trans_format = TransformFormats.NoOutput;
+                // extract the transform format if specified
+                TransformFormats trans_format = TransformFormats.NoTransform;
                 if (options.transform_format != null)
                 {
-                    if (!options.read_only)
-                    {
-                        Console.WriteLine("The transform-format flag must be accompanied by the read-only flag");
-                        return;
-                    }
                     if (Enum.IsDefined(typeof(TransformFormats), options.transform_format))
                     {
                         trans_format = (TransformFormats)Enum.Parse(typeof(TransformFormats), options.transform_format);
@@ -233,15 +307,18 @@ namespace Txt2SQL
                         return;
                     }
                 }
-                IList<TickData> readings = ReadInput(options.inputFile, new ReadInputArgs() 
-                                                                        {
-                                                                            vert_width=options.bucket_size
-                                                                            , diffs=options.diffs
-                                                                            , timeformat=options.timeformat
-                                                                            , dbname=options.dbname
-                                                                            , transform_format=trans_format
-                                                                        });
-                if (options.read_only)
+                // read values into a list of floats
+                IList<TickData> readings = InputReader.ReadInput(options.inputFile,
+                                                                 new ReadInputArgs() 
+                                                                    {
+                                                                        vert_width=options.bucket_size
+                                                                        , diffs=options.diffs
+                                                                        , timeformat=options.timeformat
+                                                                        , dbname=options.dbname
+                                                                        , transform_format=trans_format
+                                                                        , jump = options.jump
+                                                                    });
+                if (readings.Count == 0)
                 {
                     return;
                 }
